@@ -1,0 +1,5 @@
+timestamp	model	device	prompt_tokens	max_new_tokens	recompute_time_s	recompute_peak_mb	reuse_time_s	reuse_peak_mb	speedup_x	peak_mem_delta_mb
+2026-06-26 2:47:46	gpt2	cuda	81	128	1.7858	521.076	1.088	522.921	1.641	-1.845
+2026-06-26 2:47:48	gpt2	cuda	162	128	1.1635	526.301	1.0461	529.711	1.112	-3.41
+2026-06-26 2:47:51	gpt2	cuda	324	128	1.6947	541.258	1.1621	553.733	1.458	-12.475
+2026-06-26 2:47:55	gpt2	cuda	567	128	2.7826	553.882	1.0841	589.835	2.567	-35.953
