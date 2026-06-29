@@ -9,6 +9,23 @@ The claim: preserving KV cache state across inference steps is not a software co
 
 This guide lets any engineer with a CUDA-capable machine reproduce the exact results in under 30 minutes.
 
+Background: [Every Major AI Chip Is Built Wrong](https://sacredloopjason.substack.com/p/every-major-ai-chip-is-built-wrong)
+
+---
+
+### How This Benchmark Works
+
+This benchmark isolates the cost of discarding versus retaining previously computed KV state during autoregressive generation. Two generation paths are compared under identical conditions:
+
+- **Recompute path** (`use_cache=False`): the model performs full attention recomputation on every forward pass. Previously computed key-value state is discarded after each step, forcing the model to reprocess the entire prompt context from scratch.
+- **Reuse path** (`use_cache=True`): previously computed KV state is preserved and reused across generation steps. Each new token only requires computing attention over the new input, not the full context.
+
+The reuse path runs entirely on commodity off-the-shelf hardware — an RTX 5090 Laptop — using standard PyTorch and Hugging Face Transformers. No custom silicon, no modified drivers, no special memory hardware.
+
+What this benchmark emulates is the **economic consequence** of two competing hardware design assumptions: KV state treated as ephemeral scratch memory versus KV state treated as a retained computed asset. The software toggle (`use_cache`) is the controlled variable that isolates the cost difference. The 48x speedup at 1,053 tokens is the economic signal that results.
+
+The gap between what this benchmark achieves in software and what the hardware argument calls for is specifically **cross-session persistence and hardware-level memory hierarchy guarantees**. The software path cannot survive a process restart, cannot guarantee the memory won't be evicted under load, and requires the application layer to manage state explicitly. The hardware case is that those guarantees should live in the memory hierarchy itself — not be delegated back to application software. But the value is already real and already measurable today, on hardware anyone can buy. Dedicated silicon would make it reliable. It does not need to make it larger.
+
 ---
 
 ### Results to Reproduce
@@ -119,7 +136,7 @@ syntax OK
 
 ### Step 4: Run the Benchmark
 
-Make sure you are in the project root directory and the virtual environment is active before running.
+Make sure you are in the repository root and the virtual environment is active before running.
 
 FULL SWEEP — reproduces the paper results (~25 min on RTX 5090 Laptop):
 
@@ -171,7 +188,7 @@ time_s=15.712
 --- DELTA ---
 speedup_x=7.673
 wasted_s=104.819
-Receipt written -> telemetry\kv_receipts_neo.csv
+Receipt written -> telemetry/kv_receipts_neo.csv
 ```
 
 At `prompt_tokens ~ 1053`, expect `speedup_x` in the range of 45-50x.
@@ -215,7 +232,7 @@ Substitute your GPU's spot rate and your measured `wasted_s` values to anchor th
 gpt-neo-1.3B: 2,048 tokens max total (prompt + generated)
 - Exceeding this triggers a CUDA index out-of-bounds error.
 - This is a model architecture constraint, not a benchmark bug.
-- If you hit it, verify that `prompt_tokens + max_new_tokens < 2048`.
+- Verify that `prompt_tokens + max_new_tokens < 2048`.
 
 gpt2: 1,024 tokens max total
 - Use `--max_new_tokens 128` or less for context-length sweeps.
@@ -234,7 +251,7 @@ No module named transformers / torch
 - Your virtual environment is not active. Activate it first, then reinstall dependencies.
 
 Script not found
-- Make sure `kv_receipt_basic_v2.py` is in `scripts/` and that you are running commands from the repository root.
+- Confirm `kv_receipt_basic_v2.py` is in `scripts/` and that you are running commands from the repository root.
 
 Slow on first run
 - Normal. The model downloads once to the Hugging Face cache and is reused after that.
