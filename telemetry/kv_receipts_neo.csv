@@ -1,0 +1,5 @@
+timestamp	model	device	prompt_tokens	max_new_tokens	recompute_time_s	recompute_peak_mb	reuse_time_s	reuse_peak_mb	speedup_x	peak_mem_delta_mb
+2026-06-19 2:09:39	EleutherAI/gpt-neo-1.3B	cuda	162	900	120.5061	5473.361	15.7017	5553.031	7.675	-79.67
+2026-06-19 2:12:49	EleutherAI/gpt-neo-1.3B	cuda	324	900	174.314	5546.681	15.8815	5630.217	10.976	-83.536
+2026-06-19 2:17:16	EleutherAI/gpt-neo-1.3B	cuda	567	900	250.355	5671.515	16.2135	5716.87	15.441	-45.355
+2026-06-19 2:34:28	EleutherAI/gpt-neo-1.3B	cuda	1053	900	1009.4618	5966.543	20.9594	5898.729	48.163	67.814
