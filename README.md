@@ -1,280 +1,455 @@
-# KV Cache State Is a First-Class Computed Asset
-## Independent Replication Guide · SacredLoop · June 2026
+# KV Cache Benchmark — Replication Guide
+
+Reproduce the KV cache reuse vs. recompute benchmark from the SacredLoop paper on any CUDA-capable laptop in under 30 minutes.
+
+**Hardware used for published results:** RTX 5090 Laptop (23.9 GB VRAM) · CUDA 12.8 · Windows 11
+
+**Software stack:** torch 2.x+cu128 · transformers 5.12.1 · Python 3.11
+
+**Models benchmarked:** gpt2 (117M) · EleutherAI/gpt-neo-1.3B · EleutherAI/gpt-neo-2.7B · EleutherAI/gpt-j-6B
+
+Your absolute times will differ based on GPU. The speedup ratios and the superlinear growth curve across model size and context length are what you are verifying.
 
 ---
 
-### What You Are Verifying
+## Prerequisites
 
-The claim: preserving KV cache state across inference steps is not a software convenience. It is a hardware design decision with a measurable economic cost. Discarding it on every session reset forces quadratic attention recomputation that scales superlinearly with context length.
-
-This guide lets any engineer with a CUDA-capable machine reproduce the exact results in under 30 minutes.
-
-Background: [Every Major AI Chip Is Built Wrong](https://sacredloopjason.substack.com/p/every-major-ai-chip-is-built-wrong)
+- Windows 10/11 with a CUDA-capable NVIDIA GPU (16 GB+ VRAM recommended for gpt-j-6B)
+- Internet connection
+- ~40 GB free disk space (all four model weight sets)
 
 ---
 
-### How This Benchmark Works
+## Windows Setup
 
-This benchmark isolates the cost of discarding versus retaining previously computed KV state during autoregressive generation. Two generation paths are compared under identical conditions:
+### Open PowerShell as Administrator
 
-- **Recompute path** (`use_cache=False`): the model performs full attention recomputation on every forward pass. Previously computed key-value state is discarded after each step, forcing the model to reprocess the entire prompt context from scratch.
-- **Reuse path** (`use_cache=True`): previously computed KV state is preserved and reused across generation steps. Each new token only requires computing attention over the new input, not the full context.
+Right-click the Start menu → Windows PowerShell (Admin) or Terminal (Admin). All blocks below must run in this session.
 
-The reuse path runs entirely on commodity off-the-shelf hardware — an RTX 5090 Laptop — using standard PyTorch and Hugging Face Transformers. No custom silicon, no modified drivers, no special memory hardware.
+**Verify you are running as Administrator:**
 
-What this benchmark emulates is the **economic consequence** of two competing hardware design assumptions: KV state treated as ephemeral scratch memory versus KV state treated as a retained computed asset. The software toggle (`use_cache`) is the controlled variable that isolates the cost difference. The 48x speedup at 1,053 tokens is the economic signal that results.
+```powershell
+[System.Security.Principal.WindowsIdentity]::GetCurrent().Groups -match "S-1-5-32-544"
+```
 
-The gap between what this benchmark achieves in software and what the hardware argument calls for is specifically **cross-session persistence and hardware-level memory hierarchy guarantees**. The software path cannot survive a process restart, cannot guarantee the memory won't be evicted under load, and requires the application layer to manage state explicitly. The hardware case is that those guarantees should live in the memory hierarchy itself — not be delegated back to application software. But the value is already real and already measurable today, on hardware anyone can buy. Dedicated silicon would make it reliable. It does not need to make it larger.
-
----
-
-### Results to Reproduce
-
-gpt-neo-1.3B · RTX 5090 Laptop · CUDA 12.8 · max_new_tokens=900
-
-| Context Length | Recompute Time (s) | Reuse Time (s) | Speedup | Wasted/Session |
-|---|---:|---:|---:|---:|
-| 162 tokens | 120.5 | 15.7 | 7.7x | 104.8s |
-| 324 tokens | 174.3 | 15.9 | 11.0x | 158.4s |
-| 567 tokens | 250.4 | 16.2 | 15.4x | 234.1s |
-| 1,053 tokens | 1,009.5 | 21.0 | 48.2x | 988.5s |
-
-Reuse time is nearly flat (15.7s to 21.0s). Recompute time scales superlinearly (120s to 1,009s). This is quadratic attention cost, not a software artifact.
-
-Model size amplifies the effect (567-token comparison):
-
-| Model | Parameters | Speedup at 567 tokens |
-|---|---:|---:|
-| gpt2 | 117M | 2.6x |
-| gpt-neo-1.3B | 1.3B | 15.4x |
-
-A 6x larger speedup from an 11x larger model.
+Expected: a line containing `S-1-5-32-544`. If nothing returns, close and reopen PowerShell as Administrator before continuing.
 
 ---
 
-### Hardware Requirements
+### Block 0 — Prerequisites Check
 
-- CUDA-capable GPU with >= 8GB VRAM (tested: RTX 5090 Laptop, 24GB)
-- 16GB system RAM recommended
-- ~3GB free disk space for first-run model downloads
-- Internet connection for the first run
+Run each check. If a check fails, run the install command immediately below it, then close and reopen PowerShell as Administrator before continuing to the next check.
 
-CPU fallback: add `--device cpu` to any run command, but runtimes will be dramatically slower and results will not match the published CUDA numbers.
+**Check Python:**
 
-Mac note: Mac is **not** supported for canonical replication. Apple Silicon machines can run the script for basic validation, but they cannot reproduce the published CUDA benchmark results.
+```powershell
+python --version
+```
+
+Expected: `Python 3.10.x` or `Python 3.11.x`.
+If not found or wrong version:
+
+```powershell
+winget upgrade winget
+winget install Python.Python.3.11
+```
+
+Close and reopen PowerShell as Administrator, then re-run the check before continuing.
+
+**Check Git:**
+
+```powershell
+git --version
+```
+
+Expected: `git version 2.x.x.windows.x`
+If not found:
+
+```powershell
+winget upgrade winget
+winget install Git.Git
+```
+
+Close and reopen PowerShell as Administrator, then re-run the check before continuing.
+
+**Check NVIDIA driver:**
+
+```powershell
+nvidia-smi
+```
+
+Expected: a table showing your GPU name, driver version, and CUDA version (12.x or higher).
+If not found or errors: download the latest driver from nvidia.com/drivers. A driver supporting CUDA 12.8 or higher is required. After installing, reboot and reopen PowerShell as Administrator before continuing.
 
 ---
 
-### What You Need
+### Block 1 — Directory and Repository
 
-1. Python 3.10 or higher installed
-2. Git installed
-3. About 30 minutes for a full sweep, or about 5 minutes for a quick validation run
-
----
-
-### Step 1: Clone the Repository
-
-Clone the benchmark repository and enter the project directory:
-
-```bash
+```powershell
+New-Item -ItemType Directory -Force -Path C:\sacredloop | Out-Null
+cd C:\sacredloop
 git clone https://github.com/sacredloopjason/kv-cache-benchmark.git
 cd kv-cache-benchmark
 ```
 
-This repository contains the benchmark script, replication guide, and telemetry CSVs.
+**Verify repo is intact:**
+
+```powershell
+dir scripts\kv_receipt_basic_v2.py
+```
+
+Expected: file listing showing `kv_receipt_basic_v2.py`. If not found, the clone did not complete — delete the folder and re-clone.
 
 ---
 
-### Step 2: Create a Virtual Environment
+### Block 2 — Windows Defender Exclusion
 
-Windows / PowerShell:
+This must run before the virtual environment is created.
+
+```powershell
+Add-MpPreference -ExclusionPath "C:\sacredloop"
+```
+
+**Verify the exclusion is active:**
+
+```powershell
+Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+```
+
+Expected: `C:\sacredloop` appears in the output list.
+
+---
+
+### Block 3 — Python and Virtual Environment
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install transformers torch accelerate pandas matplotlib
 ```
 
-Linux:
+**If Activate.ps1 is blocked by execution policy:**
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install transformers torch accelerate pandas matplotlib
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-Verify the environment is active — you should see `(.venv)` in your prompt.
+Then re-run the `Activate.ps1` line above.
+
+**Verify the venv is active:**
+
+```powershell
+python -c "import sys; print(sys.prefix)"
+```
+
+Expected: path ending in `kv-cache-benchmark\.venv`.
 
 ---
 
-### Step 3: Verify the Benchmark Script
+### Block 4 — pip
 
-The benchmark script is located at:
-
-```text
-scripts/kv_receipt_basic_v2.py
+```powershell
+python -m pip install --upgrade pip
 ```
 
-Do not paste or retype the script. Use the file directly from the repository.
+**Verify:**
 
-Verify it is intact before running:
+```powershell
+pip --version
+```
 
-```bash
+Expected: `pip 24.x` or higher from `.venv`.
+
+---
+
+### Block 5 — PyTorch with CUDA
+
+> PyTorch must be installed before any other package. Installing other packages first (particularly `accelerate`) will silently pull the CPU-only build of torch as a dependency.
+
+```powershell
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+**Verify torch version (must show `+cu128`):**
+
+```powershell
+python -c "import torch; print(torch.__version__)"
+```
+
+Expected: `2.x.x+cu128`
+
+**Hard gate — do not proceed if this fails:**
+
+```powershell
+python -c "import torch; assert torch.cuda.is_available(), 'STOP: CUDA not available - see Troubleshooting'; print('CUDA OK:', torch.version.cuda)"
+```
+
+Expected: `CUDA OK: 12.8`
+
+If this prints `STOP: CUDA not available`, do not continue to Block 6. See [Troubleshooting](#troubleshooting) below.
+
+---
+
+### Block 6 — Remaining Packages
+
+Pin transformers to 5.12.1 to match the published benchmark stack exactly:
+
+```powershell
+pip install transformers==5.12.1
+pip install accelerate
+pip install pandas
+pip install matplotlib
+```
+
+**Verify transformers version:**
+
+```powershell
+python -c "import transformers; print(transformers.__version__)"
+```
+
+Expected: `5.12.1`
+
+---
+
+### Block 7 — Script Verification
+
+```powershell
 python -c "import ast; ast.parse(open('scripts/kv_receipt_basic_v2.py').read()); print('syntax OK')"
 ```
 
-Expected output:
-
-```text
-syntax OK
-```
+Expected: `syntax OK`
 
 ---
 
-### Step 4: Run the Benchmark
+### Block 8 — Run the Benchmark
 
-Make sure you are in the repository root and the virtual environment is active before running.
+Run each model in order. Results are written to `telemetry/`. After each run, use the verify command to confirm the CSV was written before starting the next model.
 
-FULL SWEEP — reproduces the paper results (~25 min on RTX 5090 Laptop):
+**Quick validation — gpt-neo-1.3B at 567 tokens (~2 minutes):**
 
-Windows / PowerShell:
+```powershell
+python scripts/kv_receipt_basic_v2.py `
+  --model EleutherAI/gpt-neo-1.3B `
+  --prompt_lengths 567 `
+  --max_new_tokens 900 `
+  --output_csv telemetry/kv_receipts_neo_quick.csv `
+  --device cuda
+```
+
+**Verify and print results:**
+
+```powershell
+Import-Csv telemetry\kv_receipts_neo_quick.csv | Select-Object prompt_tokens, recompute_time_s, reuse_time_s, speedup_x, wasted_compute_s | Format-Table -AutoSize
+```
+
+Expected speedup: approximately 7×. The effect confirms KV cache reuse is working.
+
+---
+
+**Full benchmark — gpt-neo-1.3B all context lengths (~25 minutes):**
 
 ```powershell
 python scripts/kv_receipt_basic_v2.py `
   --model EleutherAI/gpt-neo-1.3B `
   --prompt_lengths 128,256,512,1024 `
   --max_new_tokens 900 `
-  --output_csv telemetry/kv_receipts_neo.csv `
+  --output_csv telemetry/kv_receipts_neo13.csv `
   --device cuda
 ```
 
-Linux:
+**Verify and print results:**
 
-```bash
-python scripts/kv_receipt_basic_v2.py   --model EleutherAI/gpt-neo-1.3B   --prompt_lengths 128,256,512,1024   --max_new_tokens 900   --output_csv telemetry/kv_receipts_neo.csv   --device cuda
-```
-
-QUICK VALIDATION — confirms the effect in ~5 min:
-
-```bash
-python scripts/kv_receipt_basic_v2.py --model EleutherAI/gpt-neo-1.3B --prompt_lengths 512 --max_new_tokens 200 --output_csv telemetry/kv_receipts_quick.csv --device cuda
-```
-
-Expected speedup at 512 tokens / 200 new tokens: 10-20x. Any result in this range confirms the effect.
-
-GPT2 MODEL-SIZE COMPARISON — validates the scaling argument (~5 min):
-
-```bash
-python scripts/kv_receipt_basic_v2.py --model gpt2 --prompt_lengths 64,128,256,512 --max_new_tokens 128 --output_csv telemetry/kv_receipts_gpt2.csv --device cuda
-```
-
-Expected speedup: 1.1-2.6x. Compare these against the neo-1.3B numbers at the same context lengths.
-
----
-
-### Expected Terminal Output
-
-```text
-Loading model: EleutherAI/gpt-neo-1.3B
-
-model=EleutherAI/gpt-neo-1.3B device=cuda prompt_tokens=162
---- RECOMPUTE PATH ---
-time_s=120.531
---- REUSE PATH ---
-time_s=15.712
---- DELTA ---
-speedup_x=7.673
-wasted_s=104.819
-Receipt written -> telemetry/kv_receipts_neo.csv
-```
-
-At `prompt_tokens ~ 1053`, expect `speedup_x` in the range of 45-50x.
-
----
-
-### Interpreting Your Results
-
-1. Reuse time should be nearly flat across all context lengths.
-2. Recompute time should grow superlinearly, not linearly.
-3. Speedup should increase with context length.
-4. Speedup should increase with model size.
-
-Your absolute numbers will differ from the paper. GPU model, driver version, clocks, and thermal state all affect wall-clock time. The shape of the curve — superlinear recompute, flat reuse, widening gap — is what you are verifying, not the exact seconds.
-
----
-
-### The Dollar Translation
-
-Reference rate: AWS p3.2xlarge (V100, 16GB) at $3.06/hr
-
-| Context Length | Wasted/Session | Cost per Reset | Cost per 1M Resets/Day |
-|---|---:|---:|---:|
-| 162 tokens | 104.8s | $0.089 | $89,000 |
-| 324 tokens | 158.4s | $0.135 | $135,000 |
-| 567 tokens | 234.1s | $0.199 | $199,000 |
-| 1,053 tokens | 988.5s | $0.840 | $840,000 |
-
-Formula:
-
-```text
-cost_per_reset = (wasted_compute_s / 3600) * hourly_gpu_rate
-```
-
-Substitute your GPU's spot rate and your measured `wasted_s` values to anchor the cost to your own hardware.
-
----
-
-### Known Architecture Limits
-
-gpt-neo-1.3B: 2,048 tokens max total (prompt + generated)
-- Exceeding this triggers a CUDA index out-of-bounds error.
-- This is a model architecture constraint, not a benchmark bug.
-- Verify that `prompt_tokens + max_new_tokens < 2048`.
-
-gpt2: 1,024 tokens max total
-- Use `--max_new_tokens 128` or less for context-length sweeps.
-
----
-
-### Troubleshooting
-
-CUDA out of memory
-- Use `--max_new_tokens 200` or switch to `--model gpt2`.
-
-CUDA index out-of-bounds
-- Reduce `--prompt_lengths` or `--max_new_tokens` so total tokens stay under the model limit.
-
-No module named transformers / torch
-- Your virtual environment is not active. Activate it first, then reinstall dependencies.
-
-Script not found
-- Confirm `kv_receipt_basic_v2.py` is in `scripts/` and that you are running commands from the repository root.
-
-Slow on first run
-- Normal. The model downloads once to the Hugging Face cache and is reused after that.
-
-Syntax check fails
-- Re-clone the repository or re-download the script from GitHub; the local file is corrupted.
-
----
-
-### Repository Structure
-
-```text
-kv-cache-benchmark/
-├── README.md
-├── scripts/
-│   └── kv_receipt_basic_v2.py
-└── telemetry/
-    ├── kv_receipts_neo.csv
-    ├── kv_receipts_gpt2.csv
-    └── kv_receipts_quick.csv
+```powershell
+Import-Csv telemetry\kv_receipts_neo13.csv | Select-Object prompt_tokens, recompute_time_s, reuse_time_s, speedup_x, wasted_compute_s | Format-Table -AutoSize
 ```
 
 ---
 
-SacredLoop · June 2026 · RTX 5090 Laptop · CUDA 12.8
-Canonical replication requires a CUDA-capable GPU.
+**Model-size comparison — gpt2 117M:**
+
+> GPT-2 has a hard context limit of 1024 tokens total. Prompt lengths and max_new_tokens are set lower to stay within that limit (largest run: 512 + 256 = 768 tokens).
+
+```powershell
+python scripts/kv_receipt_basic_v2.py `
+  --model gpt2 `
+  --prompt_lengths 64,128,256,512 `
+  --max_new_tokens 256 `
+  --output_csv telemetry/kv_receipts_gpt2.csv `
+  --device cuda
+```
+
+**Verify and print results:**
+
+```powershell
+Import-Csv telemetry\kv_receipts_gpt2.csv | Select-Object prompt_tokens, recompute_time_s, reuse_time_s, speedup_x, wasted_compute_s | Format-Table -AutoSize
+```
+
+Expected: speedup ~1× across all lengths. GPT-2 is too small for the effect to manifest.
+
+---
+
+**Model-size scaling — gpt-neo-2.7B (~45 minutes):**
+
+```powershell
+python scripts/kv_receipt_basic_v2.py `
+  --model EleutherAI/gpt-neo-2.7B `
+  --prompt_lengths 128,256,512,1024 `
+  --max_new_tokens 900 `
+  --output_csv telemetry/kv_receipts_neo27.csv `
+  --device cuda
+```
+
+**Verify and print results:**
+
+```powershell
+Import-Csv telemetry\kv_receipts_neo27.csv | Select-Object prompt_tokens, recompute_time_s, reuse_time_s, speedup_x, wasted_compute_s | Format-Table -AutoSize
+```
+
+---
+
+**Model-size scaling — gpt-j-6B (~90 minutes, requires 16 GB+ VRAM):**
+
+```powershell
+python scripts/kv_receipt_basic_v2.py `
+  --model EleutherAI/gpt-j-6B `
+  --prompt_lengths 128,256,512,1024 `
+  --max_new_tokens 900 `
+  --output_csv telemetry/kv_receipts_gptj6b.csv `
+  --device cuda
+```
+
+**Verify and print results:**
+
+```powershell
+Import-Csv telemetry\kv_receipts_gptj6b.csv | Select-Object prompt_tokens, recompute_time_s, reuse_time_s, speedup_x, wasted_compute_s | Format-Table -AutoSize
+```
+
+---
+
+**To queue 2.7B and gpt-j-6B back-to-back unattended:**
+
+```powershell
+python scripts/kv_receipt_basic_v2.py `
+  --model EleutherAI/gpt-neo-2.7B `
+  --prompt_lengths 128,256,512,1024 `
+  --max_new_tokens 900 `
+  --output_csv telemetry/kv_receipts_neo27.csv `
+  --device cuda
+
+python scripts/kv_receipt_basic_v2.py `
+  --model EleutherAI/gpt-j-6B `
+  --prompt_lengths 128,256,512,1024 `
+  --max_new_tokens 900 `
+  --output_csv telemetry/kv_receipts_gptj6b.csv `
+  --device cuda
+```
+
+---
+
+## What to Expect
+
+All results measured on RTX 5090 Laptop · torch 2.x+cu128 · transformers 5.12.1 · Windows 11. Your ratios should be close; your absolute times will scale with GPU speed.
+
+**gpt-neo-1.3B (primary benchmark):**
+
+| Context Length | Speedup | Wasted Compute (s) | max_new_tokens |
+|---|---|---|---|
+| 128 tokens | 3.5× | 29.1 | 900 |
+| 256 tokens | 4.4× | 39.0 | 900 |
+| 512 tokens | 6.4× | 62.3 | 900 |
+| 1,024 tokens | 19.9× | 327.7 | 900 |
+
+**gpt-neo-2.7B:**
+
+| Context Length | Speedup | Wasted Compute (s) | max_new_tokens |
+|---|---|---|---|
+| 128 tokens | 2.3× | 44.7 | 900 |
+| 256 tokens | 3.8× | 75.6 | 900 |
+| 512 tokens | 5.2× | 116.6 | 900 |
+| 1,024 tokens | 45.0× | 1,413.2 | 900 |
+
+**gpt-j-6B:**
+
+| Context Length | Speedup | Wasted Compute (s) | max_new_tokens |
+|---|---|---|---|
+| 128 tokens | 3.2× | 113.6 | 900 |
+| 256 tokens | 3.7× | 150.7 | 900 |
+| 512 tokens | 5.5× | 236.1 | 900 |
+| 1,024 tokens | 89.5× | 6,215.6 | 900 |
+
+**gpt2 (117M — model-size baseline):**
+
+| Context Length | Speedup | Wasted Compute (s) | max_new_tokens |
+|---|---|---|---|
+| 64 tokens | ~1.3× | 0.3 | 256 |
+| 128 tokens | ~0.8× | -0.3 | 256 |
+| 256 tokens | ~1.3× | 0.3 | 256 |
+| 512 tokens | ~1.0× | 0.0 | 256 |
+
+**Key finding:** The effect is negligible at 117M parameters and becomes dramatically superlinear above 1B parameters. At 6B parameters with 1,024-token context, recompute wastes over 103 minutes of GPU compute per inference compared to reuse. The ratio scales superlinearly with both model size and context length.
+
+> The `UNEXPECTED` warnings about `attn.attention.bias` during model load are harmless.
+
+---
+
+## Troubleshooting
+
+After any troubleshooting step, always return to the repository root before retrying:
+
+```powershell
+cd C:\sacredloop\kv-cache-benchmark
+```
+
+**Permission denied on `Add-MpPreference`**
+- PowerShell is not running as Administrator.
+- Right-click PowerShell → Run as Administrator, then re-run Block 2.
+- If admin access is unavailable, skip Block 2 and use the WSL2 fallback below.
+
+**Permission denied on `git clone`**
+- You are running from a protected directory.
+- Block 1 creates `C:\sacredloop` first — ensure you ran that step before cloning.
+
+**`Activate.ps1` cannot be loaded, running scripts is disabled**
+- Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+- Then re-run `.venv\Scripts\Activate.ps1`
+
+**DLL load failed: Application Control policy has blocked this file**
+- Windows Defender blocked a compiled extension during install.
+- Nuke the venv, ensure Block 2 ran as Administrator, then restart from Block 3.
+- If the problem persists, use the WSL2 fallback.
+
+**Hard gate prints `STOP: CUDA not available`**
+
+```powershell
+python -c "import torch; print(torch.__version__)"
+```
+
+If it shows `+cpu` instead of `+cu128`:
+
+```powershell
+pip uninstall torch -y
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+Re-run the hard gate. If it still fails, nuke the venv and restart from Block 3, ensuring Block 5 runs before Block 6.
+
+**CUDA index out of bounds / model exceeded maximum length (gpt2 only)**
+- GPT-2's context window is hard-capped at 1024 tokens total (prompt + generated).
+- Do not increase `prompt_lengths` or `max_new_tokens` beyond the values in Block 8.
+- The gpt2 run uses `64,128,256,512` prompt lengths and `max_new_tokens 256` specifically to stay within this limit.
+
+**Out of memory on gpt-j-6B**
+- gpt-j-6B requires approximately 12–16 GB VRAM in fp16.
+- Check available VRAM:
+  ```powershell
+  python -c "import torch; print(torch.cuda.get_device_properties(0).total_memory / 1024**3)"
+  ```
+- If VRAM is insufficient, skip the gpt-j-6B run — the 3-model curve (gpt2, 1.3B, 2.7B) still demonstrates the finding.
+
+**`FileNotFoundError: scripts/kv_receipt_basic_v2.py`**
+- You are not in the repository root. Run `cd C:\sacredloop\kv-cache-benchmark` and retry.
+
+**WSL2 fallback (Windows Defender issues or no admin access)**
+- Open PowerShell and run: `wsl`
+- Follow the Linux setup steps inside WSL2.
+- Your NVIDIA GPU is accessible from WSL2 via driver passthrough.
+
