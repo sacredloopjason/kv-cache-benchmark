@@ -11,7 +11,7 @@ def run_benchmark(model_name, prompt_lengths, max_new_tokens, output_csv, device
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32
+        dtype=torch.float16 if device == "cuda" else torch.float32
     ).to(device)
     model.eval()
 
